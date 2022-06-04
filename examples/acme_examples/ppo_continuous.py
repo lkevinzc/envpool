@@ -348,45 +348,72 @@ class BuilderWrapper(ppo.PPOBuilder):
     )
 
 
-class EnvPoolWrapper(wrappers.EnvironmentWrapper):
+class EnvPoolWrapper(dm_env.Environment):
 
   def __init__(self, environment: EnvPool):
-    super().__init__(environment)
-    self._num_envs = len(environment.all_env_ids)
+    self._environment = environment
+    self._reset_next_step = True
+    self._last_info = None
 
   def observation_spec(self) -> dm_env.specs.BoundedArray:
-    obs = self._environment.observation_spec().obs
+    obs = self._environment.observation_space
     new_obs = dm_env.specs.BoundedArray(
-      name=obs.name,
-      shape=[s for s in obs.shape if s != -1],
+      name="observation",
+      shape=obs.shape,
       dtype="float32",
-      minimum=obs.minimum,
-      maximum=obs.maximum,
+      minimum=obs.low,
+      maximum=obs.high,
     )
     return new_obs
 
+  def action_spec(self):
+    act = self._environment.action_space
+    new_act = dm_env.specs.BoundedArray(
+      name="action",
+      shape=act.shape,
+      dtype="float32",
+      minimum=act.low,
+      maximum=act.high,
+    )
+    return new_act
+
   def reset(self) -> TimeStep:
-    ts = super().reset()
+    self._reset_next_step = False
+    observation = self._environment.reset()
     return TimeStep(
-      step_type=ts.step_type,
-      observation=ts.observation.obs,
-      reward=ts.reward,
-      discount=ts.discount,
+      step_type=np.full(len(observation), StepType.FIRST),
+      observation=observation,
+      reward=np.zeros(len(observation)),
+      discount=np.ones(len(observation)),
       extras=None,
     )
 
   def step(self, action) -> TimeStep:
-    ts = super().step(action)
+
+    if self._reset_next_step:
+      return self.reset()
+
+    observation, reward, done, info = self._environment.step(action)
+    print(done)
+    self._reset_next_step = any(done)
+
     ts = TimeStep(
-      step_type=ts.step_type,
-      observation=ts.observation.obs,
-      reward=ts.reward[0],  # Single value for recording the return.
-      discount=ts.discount,
+      step_type=done + 1,
+      observation=observation,
+      reward=reward[0],  # Single value for recording the return.
+      discount=1 - done,
       extras={
-        "reward": ts.reward,
+        "reward": reward,
       },
     )
     return ts
+
+  @property
+  def environment(self) -> gym.Env:
+    return self._environment
+
+  def close(self):
+    self._environment.close()
 
 
 def make_environment(task: str, use_envpool: bool = False, num_envs: int = 2):
@@ -394,9 +421,10 @@ def make_environment(task: str, use_envpool: bool = False, num_envs: int = 2):
   if use_envpool:
     env = envpool.make(
       task,
-      env_type="dm",
+      env_type="gym",
       num_envs=num_envs,
     )
+    env_wrappers.append(EnvPoolWrapper)
   else:
     env = gym.make(task)
     # Make sure the environment obeys the dm_env.Environment interface.
@@ -406,8 +434,8 @@ def make_environment(task: str, use_envpool: bool = False, num_envs: int = 2):
     partial(wrappers.CanonicalSpecWrapper, clip=True),
     wrappers.SinglePrecisionWrapper
   ]
-  if use_envpool:
-    env_wrappers.append(EnvPoolWrapper)
+  # if use_envpool:
+  #   env_wrappers.append(EnvPoolWrapper)
   return wrappers.wrap_all(env, env_wrappers)
 
 
@@ -500,7 +528,12 @@ def build_experiment_config(FLAGS):
   ), config
 
 
+import pdb
+
+
 def main():
+  # env = make_environment("HalfCheetah-v4", True)
+  # pdb.set_trace()
   logging.info(f"Jax Devices: {jax.devices()}")
   FLAGS = parse_args()
   experiment, config = build_experiment_config(FLAGS)
